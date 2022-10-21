@@ -9,6 +9,7 @@ import json
 # TODO: if cant reshuffle, check if user can draw a card from the deck
 
 NUM_PLAYERS = 4
+STARTING_CARDS = 3
 players = []
 deck = []
 stack = []
@@ -28,14 +29,21 @@ class Player:
         await self.websocket.send(json.dumps({"event": "HAND", "data": self.hand}))
 
     async def playCard(self, card):
-        self.hand.remove(card)
+        cardCopy = card.copy()
+        if cardCopy["type"] == "wild":
+            cardCopy["color"] = "-"
+        self.hand.remove(cardCopy)
         await self.websocket.send(json.dumps({"event": "HAND", "data": self.hand}))
 
     async def send(self, event, data=None):
         await self.websocket.send(json.dumps({"event": event, "data": data}))
 
     async def recv(self):
-        return json.loads(await self.websocket.recv()) # {event, data}
+        message = json.loads(await self.websocket.recv()) # {event, data}
+        # if there is no data, set data to None
+        if "data" not in message:
+            message["data"] = None
+        return message
 
 async def handleNewConnection(websocket):
     name = json.loads(await websocket.recv())["data"]
@@ -118,6 +126,7 @@ async def gameLoop():
     global deck, stack, players
     global currentPlayer
     direction = 1
+    gameOver = False
 
     print("Game loop started")
 
@@ -183,46 +192,8 @@ async def gameLoop():
                 
     """
 
-    # while True:
-    #     # send stack to all players
-    #     websockets.broadcast(set(map(lambda player: player.websocket, players)), json.dumps({"event": "STACK", "data": stack[-1]}))
-
-    #     # send player board to all players 
-    #     # {name, numCards, turn}[]. turn is 0: not turn, 1: turn, 2: next turn
-    #     playerBoard = []
-    #     for i in range(NUM_PLAYERS):
-    #         playerBoard.append({"name": players[i].name, "numCards": len(players[i].hand), "turn": 0})
-    #     playerBoard[currentPlayer]["turn"] = 1
-    #     playerBoard[(currentPlayer + direction) % NUM_PLAYERS]["turn"] = 2
-    #     websockets.broadcast(set(map(lambda player: player.websocket, players)), json.dumps({"event": "PLAYER_BOARD", "data": playerBoard}))
-        
-    #     # send turn to current player
-    #     await players[currentPlayer].websocket.send("TURN")
-
-    #     # wait for player to play a card
-    #     card = await players[currentPlayer].websocket.recv() # card: {"type": "number", "color": "red", "value": "1"} | {"type": "action", "color": "blue", "value": "skip"} | {"type": "wild", "color": "green", "value": "wild"}
-    #     card = eval(card)
-
-    #     # check if card is valid
-    #     if not isValidCard(card):
-    #         players[currentPlayer].websocket.send("INVALID")
-    #         continue
-
-    #     # remove card from player's hand
-    #     players[currentPlayer].playCard(card)
-
-    #     # add card to stack
-    #     stack.append(card)
-
-    #     # check if player has won
-    #     if len(players[currentPlayer].hand) == 0:
-    #         players[currentPlayer].websocket.send("WIN")
-    #         # send message to all players except winner
-    #         websockets.broadcast(set(map(lambda player: player.websocket, players)) - set([players[currentPlayer].websocket]), "WINNER:" + players[currentPlayer].name)
-    #         break
-
     # Game loop
-    while True:
+    while not gameOver:
         # send stack to all players
         await sendToAllPlayers("STACK", stack[-1])
         # send player board to all players
@@ -238,32 +209,48 @@ async def gameLoop():
         if (stack[-1]["type"] == "action" or stack[-1]["value"] == "draw4") and not stack[-1]["executed"]:
             # Execute the action
             if stack[-1]["value"] == "draw2":
-                # Draw 2 cards
+                # Tell the player he must draw two cards
+                await players[currentPlayer].send("DRAW2")
+                # Wait for the player to send a DRAW2 message
+                while True:
+                    message = await players[currentPlayer].recv()
+                    if message["event"] == "DRAW2":
+                        break
+                # Send cards to player
                 cards = [ deck.pop() for _ in range(2) ]
-                await players[currentPlayer].send({"event": "DRAW2", "data": cards})
-                # add the cards to the player's hand
+                await players[currentPlayer].send("DRAW", cards)
+                # Add cards to player's hand
                 players[currentPlayer].hand += cards
-                    
                 # Tell all players that the current player has drawn 2 cards
-                await sendToAllPlayers({"event": "DRAWN", "data": {"player": players[currentPlayer].name, "amount": 2}})
+                await sendToAllPlayers("DRAWN", {"player": players[currentPlayer].name, "amount": 2})
             elif stack[-1]["value"] == "skip":
-                await sendToAllPlayers({"event": "SKIP", "data": {"player": players[currentPlayer].name}})
+                await sendToAllPlayers("SKIP", {"player": players[currentPlayer].name})
             elif stack[-1]["value"] == "reverse":
                 await sendToAllPlayers("REVERSE")
                 direction *= -1
+                currentPlayer += direction
             elif stack[-1]["value"] == "draw4":
-                # Draw 4 cards
+                # Tell the player he must draw four cards
+                await players[currentPlayer].send("DRAW4")
+                # Wait for the player to send a DRAW4 message
+                while True:
+                    message = await players[currentPlayer].recv()
+                    if message["event"] == "DRAW4":
+                        break
+                # Send cards to player
                 cards = [ deck.pop() for _ in range(4) ]
-                await players[currentPlayer].send({"event": "DRAW4", "data": cards})
-                # add the cards to the player's hand
+                await players[currentPlayer].send("DRAW", cards)
+                # Add cards to player's hand
                 players[currentPlayer].hand += cards
                 # Tell all players that the current player has drawn 4 cards
-                await sendToAllPlayers({"event": "DRAWN", "data": {"player": players[currentPlayer].name, "amount": 4}})
+                await sendToAllPlayers("DRAWN", {"player": players[currentPlayer].name, "amount": 4})
             stack[-1]["executed"] = True
+            # send hand to current player
+            passTurn(direction)
             continue
 
         # send turn to current player
-        await players[currentPlayer].send({"event": "TURN"})
+        await players[currentPlayer].send("TURN")
         hasSaidUno = False
         while True:
             # receive message from current player
@@ -274,24 +261,27 @@ async def gameLoop():
             if event == "DRAW":
                 # Draw a card
                 card = deck.pop()
-                await players[currentPlayer].send({"event": "DRAW", "data": card})
+                await players[currentPlayer].send("DRAW", [card])
                 # add the card to the player's hand
-                players[currentPlayer].hand.append(card)
+                players[currentPlayer].hand = [card] + players[currentPlayer].hand
                 # Tell all players that the current player has drawn a card
                 await sendToAllPlayers({"event": "DRAWN", "data": {"player": players[currentPlayer].name, "amount": 1}})
+                # send board to all players
+                await sendToAllPlayers("PLAYER_BOARD", playerBoard)
+
                 continue
             elif event == "UNO":
-                if players[currentPlayer].hand == 2:
+                if len(players[currentPlayer].hand) == 2:
                     hasSaidUno = True
-                    await sendToAllPlayers({"event": "UNO", "data": {"player": players[currentPlayer].name}})
+                    await sendToAllPlayers("UNO", {"player": players[currentPlayer].name})
                 continue
             elif event == "PLAY":
                 # check if card is valid
                 if not isValidCard(data):
-                    await players[currentPlayer].send({"event": "INVALID"})
+                    await players[currentPlayer].send("INVALID_CARD")
                     continue
                 # remove card from player's hand
-                players[currentPlayer].playCard(data)
+                await players[currentPlayer].playCard(data)
                 # if its an action card, set executed to false
                 if data["type"] == "action":
                     data["executed"] = False
@@ -299,26 +289,36 @@ async def gameLoop():
                 stack.append(data)
 
                 # check if penalty needs to be applied
-                if players[currentPlayer].hand == 1 and not hasSaidUno:
+                if len(players[currentPlayer].hand) == 1 and not hasSaidUno:
                     # Draw 2 cards
                     cards = [ deck.pop() for _ in range(2) ]
-                    await players[currentPlayer].send({"event": "DRAW2", "data": cards})
-                    # add the cards to the player's hand
+                    await players[currentPlayer].send("UNO_PENALTY")
+                    # Wait for the player to send a DRAW2 message
+                    while True:
+                        message = await players[currentPlayer].recv()
+                        if message["event"] == "DRAW2":
+                            break
+                    # Send cards to player
+                    await players[currentPlayer].send("DRAW", cards)
+                    # Add cards to player's hand
                     players[currentPlayer].hand += cards
-                    
                     # Tell all players that the current player has drawn 2 cards
-                    await sendToAllPlayers({"event": "DRAWN", "data": {"player": players[currentPlayer].name, "amount": 2}})
+                    await sendToAllPlayers("DRAWN", {"player": players[currentPlayer].name, "amount": 2})
+                    break
                 # check if player has won
                 if len(players[currentPlayer].hand) == 0:
-                    await sendToAllPlayers({"event": "WINNER", "data": {"player": players[currentPlayer].name}})
+                    await sendToAllPlayers("WINNER", {"player": players[currentPlayer].name})
+                    gameOver = True
                     break
                 break
+        # send hand to current player
+        passTurn(direction)
 
 def isValidCard(card):
     global stack
 
     # check if card is a wild card
-    if card["value"] == "wild":
+    if card["type"] == "wild":
         return True
 
     # check if card is same color or same value as top card on stack
@@ -343,15 +343,15 @@ async def main():
         # Randomize player order
         random.shuffle(players)
 
-        # give each player 7 cards
+        # give each player their starting hand
         for player in players:
-            await player.setHand(deck[:7])
-            deck = deck[7:]
+            await player.setHand(deck[:STARTING_CARDS])
+            deck = deck[STARTING_CARDS:]
 
         # set the first card on the stack
         while True:
             card = deck.pop(0)
-            if card["value"] != "wild":
+            if card["type"] != "wild":
                 stack.append(card)
                 break
             else:
@@ -359,6 +359,10 @@ async def main():
 
         # start game loop
         await gameLoop()
+
+        # disconnect all players
+        for player in players:
+            await player.websocket.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
