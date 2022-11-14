@@ -2,18 +2,21 @@
 
 import asyncio
 import random
+import socket
 import websockets
 import json
 
-# TODO: check if the stack has enough cards to reshuffle
-# TODO: if cant reshuffle, check if user can draw a card from the deck
-
 NUM_PLAYERS = 4
-STARTING_CARDS = 3
+STARTING_CARDS = 7
 players = []
 deck = []
 stack = []
 currentPlayer = 0
+# where the socket will be listening for messages
+# get the current ip address of the computer
+host = socket.gethostbyname(socket.gethostname())
+port = 4000
+print("Server started on " + host + ":" + str(port))
 
 class Player:
     def __init__(self, name, websocket):
@@ -330,7 +333,7 @@ def isValidCard(card):
 async def main():
     global deck, stack, players
 
-    async with websockets.serve(handleNewConnection, "localhost", 4000):
+    async with websockets.serve(handleNewConnection, host, port):
         # await asyncio.Future()
 
         # wait for all players to connect
